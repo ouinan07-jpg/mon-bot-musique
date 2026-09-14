@@ -134,4 +134,4 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.AUDIO | filters.Document.AUDIO, handle_audio))
     
     print("Le bot est en marche...")
-    app.run_polling()Welcome to Python IDE! If you like it, please leave a review.
+    app.run_polling()
