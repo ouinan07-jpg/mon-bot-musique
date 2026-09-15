@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import logging
+import asyncio
 from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -30,7 +31,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Utilise /playlists pour naviguer dans ta musique. 🎵"
     )
 
-# --- Indexation des fichiers ---
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     audio = message.audio or message.document
@@ -64,7 +64,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# --- Navigation Playlist ---
 async def playlists(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = init_db()
     cursor = conn.cursor()
@@ -98,44 +97,53 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         keyboard = []
+        # Bouton magique pour tout lire
+        keyboard.append([InlineKeyboardButton("🎶 Tout lire", callback_data=f"playall:{artist_name}")])
         for album in albums:
-            keyboard.append([InlineKeyboardButton(album, callback_data=f"album:{artist_name}:{album}")])
+            keyboard.append([InlineKeyboardButton(f"💿 {album}", callback_data=f"album:{artist_name}:{album}")])
         keyboard.append([InlineKeyboardButton("⬅️ Retour", callback_data="back_to_artists")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(f"💿 **Albums de {artist_name} :**", reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text(f"🎤 **{artist_name}**\nChoisis un album ou écoute tout :", reply_markup=reply_markup, parse_mode='Markdown')
 
-    elif data.startswith("album:"):
-        _, artist_name, album_name = data.split(":", 2)
-        cursor.execute("SELECT id, title FROM tracks WHERE artist = ? AND album = ? ORDER BY title", (artist_name, album_name))
+    elif data.startswith("playall:"):
+        artist_name = data.split(":", 1)[1]
+        cursor.execute("SELECT file_id, title, album FROM tracks WHERE artist = ? ORDER BY album, title", (artist_name,))
         tracks = cursor.fetchall()
         conn.close()
 
-        keyboard = []
-        for track_id, title in tracks:
-            keyboard.append([InlineKeyboardButton(f"▶️ {title}", callback_data=f"track:{track_id}")])
-        keyboard.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"artist:{artist_name}")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(f"🎵 **Morceaux de l'album {album_name} :**", reply_markup=reply_markup, parse_mode='Markdown')
+        if tracks:
+            await query.message.reply_text(f"🎵 Envoi de tous les morceaux de **{artist_name}**...")
+            for file_id, title, album in tracks:
+                try:
+                    await query.message.reply_audio(audio=file_id, title=title, performer=artist_name)
+                    await asyncio.sleep(1) # Pause de 1 seconde pour éviter le flood
+                except Exception as e:
+                    logging.error(f"Erreur envoi {title}: {e}")
+        else:
+            await query.message.reply_text("Aucun morceau trouvé.")
 
-    elif data.startswith("track:"):
-        track_id = data.split(":", 1)[1]
-        cursor.execute("SELECT file_id, title, artist FROM tracks WHERE id = ?", (track_id,))
-        result = cursor.fetchone()
+    elif data.startswith("album:"):
+        _, artist_name, album_name = data.split(":", 2)
+        cursor.execute("SELECT file_id, title FROM tracks WHERE artist = ? AND album = ? ORDER BY title", (artist_name, album_name))
+        tracks = cursor.fetchall()
         conn.close()
 
-        if result:
-            file_id, title, artist = result
-            await query.message.reply_audio(audio=file_id, title=title, performer=artist)
+        if tracks:
+            await query.message.reply_text(f"🎵 Envoi de l'album **{album_name}**...")
+            for file_id, title in tracks:
+                try:
+                    await query.message.reply_audio(audio=file_id, title=title, performer=artist_name)
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logging.error(f"Erreur envoi {title}: {e}")
         else:
-            await query.message.reply_text("Morceau introuvable.")
+            await query.message.reply_text("Aucun morceau trouvé dans cet album.")
 
     elif data == "back_to_artists":
         conn.close()
         await playlists(update, context)
 
-# --- Point d'entrée ---
 if __name__ == '__main__':
     TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'TON_TOKEN_ICI')
     app = ApplicationBuilder().token(TOKEN).build()
