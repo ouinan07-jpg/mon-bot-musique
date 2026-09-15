@@ -10,7 +10,6 @@ from mutagen.easyid3 import EasyID3
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Dictionnaire global pour stocker les IDs des messages envoyés par utilisateur
 user_sent_messages = {}
 
 def init_db():
@@ -35,13 +34,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Utilise /playlists pour naviguer dans ta musique. 🎵"
     )
 
-# Fonction pour nettoyer le nom de l'artiste (gestion des feats)
 def clean_artist_name(artist_string):
     if not artist_string or artist_string == "Inconnu":
         return "Inconnu"
-    # Séparer par virgule, &, feat, ft, x
     parts = re.split(r',|&| feat\.| ft\.| x ', artist_string, flags=re.IGNORECASE)
-    # Nettoyer les espaces et enlever les parties vides
     cleaned_parts = [p.strip() for p in parts if p.strip()]
     return ", ".join(cleaned_parts)
 
@@ -67,7 +63,6 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = init_db()
     cursor = conn.cursor()
-    # On stocke l'artiste nettoyé
     cursor.execute(
         "INSERT INTO tracks (file_id, artist, title, album, genre) VALUES (?, ?, ?, ?, ?)",
         (audio.file_id, artist, title, album, genre)
@@ -80,26 +75,43 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def playlists(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Fonction utilitaire pour générer le menu des artistes ---
+def get_artists_menu():
     conn = init_db()
     cursor = conn.cursor()
-    # On récupère tous les artistes uniques
-    cursor.execute("SELECT DISTINCT artist FROM tracks ORDER BY artist")
-    artists = [row[0] for row in cursor.fetchall()]
+    cursor.execute("SELECT artist FROM tracks")
+    raw_artists = [row[0] for row in cursor.fetchall()]
     conn.close()
 
-    if not artists:
-        await update.message.reply_text("Ta bibliothèque est vide. Envoie-moi des MP3 !")
-        return
+    if not raw_artists:
+        return "Ta bibliothèque est vide. Envoie-moi des MP3 !", None
 
-    keyboard = []
-    for artist in artists:
-        # Si l'artiste contient plusieurs noms, on prend le premier comme nom principal pour l'affichage
-        display_name = artist.split(',')[0].strip()
-        keyboard.append([InlineKeyboardButton(display_name, callback_data=f"artist:{artist}")])
+    grouped_artists = {}
+    for raw in raw_artists:
+        if not raw or raw == "Inconnu":
+            continue
+        parts = re.split(r',|&| feat\.| ft\.| x ', raw, flags=re.IGNORECASE)
+        for p in parts:
+            cleaned = p.strip()
+            if cleaned:
+                key = cleaned.lower()
+                if key not in grouped_artists:
+                    grouped_artists[key] = cleaned
+
+    sorted_artists = sorted(grouped_artists.values())
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("🎤 **Choisis un artiste :**", reply_markup=reply_markup, parse_mode='Markdown')
+    keyboard = []
+    for artist in sorted_artists:
+        keyboard.append([InlineKeyboardButton(artist, callback_data=f"artist:{artist}")])
+    
+    return "🎤 **Choisis un artiste :**", InlineKeyboardMarkup(keyboard)
+
+async def playlists(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, reply_markup = get_artists_menu()
+    if reply_markup:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(text)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -112,7 +124,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("artist:"):
         artist_name = data.split(":", 1)[1]
-        cursor.execute("SELECT DISTINCT album FROM tracks WHERE artist = ? ORDER BY album", (artist_name,))
+        cursor.execute("SELECT DISTINCT album FROM tracks WHERE artist LIKE ? ORDER BY album", (f'%{artist_name}%',))
         albums = [row[0] for row in cursor.fetchall()]
         conn.close()
 
@@ -127,7 +139,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("playall:"):
         artist_name = data.split(":", 1)[1]
-        cursor.execute("SELECT file_id, title, album FROM tracks WHERE artist = ? ORDER BY album, title", (artist_name,))
+        cursor.execute("SELECT file_id, title, album FROM tracks WHERE artist LIKE ? ORDER BY album, title", (f'%{artist_name}%',))
         tracks = cursor.fetchall()
         conn.close()
 
@@ -141,14 +153,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.sleep(1)
                 except Exception as e:
                     logging.error(f"Erreur envoi {title}: {e}")
-            # On stocke les IDs des messages envoyés pour pouvoir les supprimer plus tard
             user_sent_messages[user_id] = sent_msgs
         else:
             await query.message.reply_text("Aucun morceau trouvé.")
 
     elif data.startswith("album:"):
         _, artist_name, album_name = data.split(":", 2)
-        cursor.execute("SELECT file_id, title FROM tracks WHERE artist = ? AND album = ? ORDER BY title", (artist_name, album_name))
+        cursor.execute("SELECT file_id, title FROM tracks WHERE artist LIKE ? AND album = ? ORDER BY title", (f'%{artist_name}%', album_name))
         tracks = cursor.fetchall()
         conn.close()
 
@@ -167,10 +178,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Aucun morceau trouvé dans cet album.")
 
     elif data == "back_to_artists":
-        conn.close()
-        # Supprimer les messages audio envoyés précédemment
+        # 1. Supprimer les messages audio envoyés précédemment
         if user_id in user_sent_messages:
-            await query.message.reply_text("🧹 Nettoyage des morceaux...")
             for msg_id in user_sent_messages[user_id]:
                 try:
                     await context.bot.delete_message(chat_id=query.message.chat_id, message_id=msg_id)
@@ -178,7 +187,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logging.warning(f"Impossible de supprimer le message {msg_id}: {e}")
             del user_sent_messages[user_id]
         
-        await playlists(update, context)
+        # 2. Remplacer le message actuel par la liste des artistes
+        text, reply_markup = get_artists_menu()
+        if reply_markup:
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await query.edit_message_text(text)
 
 if __name__ == '__main__':
     TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'TON_TOKEN_ICI')
