@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import logging
 import asyncio
@@ -8,6 +9,9 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 from mutagen.easyid3 import EasyID3
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# Dictionnaire global pour stocker les IDs des messages envoyés par utilisateur
+user_sent_messages = {}
 
 def init_db():
     conn = sqlite3.connect('music_index.db')
@@ -31,6 +35,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Utilise /playlists pour naviguer dans ta musique. 🎵"
     )
 
+# Fonction pour nettoyer le nom de l'artiste (gestion des feats)
+def clean_artist_name(artist_string):
+    if not artist_string or artist_string == "Inconnu":
+        return "Inconnu"
+    # Séparer par virgule, &, feat, ft, x
+    parts = re.split(r',|&| feat\.| ft\.| x ', artist_string, flags=re.IGNORECASE)
+    # Nettoyer les espaces et enlever les parties vides
+    cleaned_parts = [p.strip() for p in parts if p.strip()]
+    return ", ".join(cleaned_parts)
+
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     audio = message.audio or message.document
@@ -43,7 +57,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     artist, title, album, genre = "Inconnu", "Inconnu", "Inconnu", "Inconnu"
     try:
         audio_tags = EasyID3(BytesIO(file_bytes))
-        artist = audio_tags.get('artist', ['Inconnu'])[0]
+        raw_artist = audio_tags.get('artist', ['Inconnu'])[0]
+        artist = clean_artist_name(raw_artist)
         title = audio_tags.get('title', ['Inconnu'])[0]
         album = audio_tags.get('album', ['Inconnu'])[0]
         genre = audio_tags.get('genre', ['Inconnu'])[0]
@@ -52,6 +67,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = init_db()
     cursor = conn.cursor()
+    # On stocke l'artiste nettoyé
     cursor.execute(
         "INSERT INTO tracks (file_id, artist, title, album, genre) VALUES (?, ?, ?, ?, ?)",
         (audio.file_id, artist, title, album, genre)
@@ -67,6 +83,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def playlists(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = init_db()
     cursor = conn.cursor()
+    # On récupère tous les artistes uniques
     cursor.execute("SELECT DISTINCT artist FROM tracks ORDER BY artist")
     artists = [row[0] for row in cursor.fetchall()]
     conn.close()
@@ -77,7 +94,9 @@ async def playlists(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = []
     for artist in artists:
-        keyboard.append([InlineKeyboardButton(artist, callback_data=f"artist:{artist}")])
+        # Si l'artiste contient plusieurs noms, on prend le premier comme nom principal pour l'affichage
+        display_name = artist.split(',')[0].strip()
+        keyboard.append([InlineKeyboardButton(display_name, callback_data=f"artist:{artist}")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🎤 **Choisis un artiste :**", reply_markup=reply_markup, parse_mode='Markdown')
@@ -86,6 +105,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+    user_id = query.from_user.id
 
     conn = init_db()
     cursor = conn.cursor()
@@ -97,7 +117,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         keyboard = []
-        # Bouton magique pour tout lire
         keyboard.append([InlineKeyboardButton("🎶 Tout lire", callback_data=f"playall:{artist_name}")])
         for album in albums:
             keyboard.append([InlineKeyboardButton(f"💿 {album}", callback_data=f"album:{artist_name}:{album}")])
@@ -114,12 +133,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if tracks:
             await query.message.reply_text(f"🎵 Envoi de tous les morceaux de **{artist_name}**...")
+            sent_msgs = []
             for file_id, title, album in tracks:
                 try:
-                    await query.message.reply_audio(audio=file_id, title=title, performer=artist_name)
-                    await asyncio.sleep(1) # Pause de 1 seconde pour éviter le flood
+                    msg = await query.message.reply_audio(audio=file_id, title=title, performer=artist_name)
+                    sent_msgs.append(msg.message_id)
+                    await asyncio.sleep(1)
                 except Exception as e:
                     logging.error(f"Erreur envoi {title}: {e}")
+            # On stocke les IDs des messages envoyés pour pouvoir les supprimer plus tard
+            user_sent_messages[user_id] = sent_msgs
         else:
             await query.message.reply_text("Aucun morceau trouvé.")
 
@@ -131,17 +154,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if tracks:
             await query.message.reply_text(f"🎵 Envoi de l'album **{album_name}**...")
+            sent_msgs = []
             for file_id, title in tracks:
                 try:
-                    await query.message.reply_audio(audio=file_id, title=title, performer=artist_name)
+                    msg = await query.message.reply_audio(audio=file_id, title=title, performer=artist_name)
+                    sent_msgs.append(msg.message_id)
                     await asyncio.sleep(1)
                 except Exception as e:
                     logging.error(f"Erreur envoi {title}: {e}")
+            user_sent_messages[user_id] = sent_msgs
         else:
             await query.message.reply_text("Aucun morceau trouvé dans cet album.")
 
     elif data == "back_to_artists":
         conn.close()
+        # Supprimer les messages audio envoyés précédemment
+        if user_id in user_sent_messages:
+            await query.message.reply_text("🧹 Nettoyage des morceaux...")
+            for msg_id in user_sent_messages[user_id]:
+                try:
+                    await context.bot.delete_message(chat_id=query.message.chat_id, message_id=msg_id)
+                except Exception as e:
+                    logging.warning(f"Impossible de supprimer le message {msg_id}: {e}")
+            del user_sent_messages[user_id]
+        
         await playlists(update, context)
 
 if __name__ == '__main__':
