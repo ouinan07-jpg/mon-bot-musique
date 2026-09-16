@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ma Musique</title>
+    <style>
+        body { background-color: #121212; color: white; font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        h1 { color: #1DB954; text-align: center; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; }
+        .card { background-color: #181818; border-radius: 8px; padding: 15px; transition: background 0.3s; cursor: pointer; }
+        .card:hover { background-color: #282828; }
+        .card img { width: 100%; border-radius: 4px; margin-bottom: 10px; }
+        .card h3 { font-size: 14px; margin: 0 0 5px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .card p { font-size: 12px; color: #b3b3b3; margin: 0; }
+    </style>
+</head>
+<body>
+    <h1>🎵 Ma Bibliothèque</h1>
+    <div class="grid" id="music-grid"></div>
+
+    <script>
+        // Remplace cette URL par celle de ton API sur Railway
+        const API_URL = 'https://ton-projet-production.up.railway.app/tracks';
+
+        async function loadMusic() {
+            try {
+                const response = await fetch(API_URL);
+                const tracks = await response.json();
+                const grid = document.getElementById('music-grid');
+
+                tracks.forEach(track => {
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    // Image par défaut
+                    card.innerHTML = `
+                        <img src="https://via.placeholder.com/150/1DB954/FFFFFF?text=♪" alt="cover">
+                        <h3>${track.title}</h3>
+                        <p>${track.artist}</p>
+                    `;
+                    card.onclick = () => {
+                        // Envoyer l'ordre au bot de jouer ce morceau
+                        if (window.Telegram && window.Telegram.WebApp) {
+                            window.Telegram.WebApp.sendData(JSON.stringify({ action: 'play', file_id: track.file_id, title: track.title, artist: track.artist }));
+                        } else {
+                            alert("Ouvre cette page depuis Telegram pour écouter la musique !");
+                        }
+                    };
+                    grid.appendChild(card);
+                });
+            } catch (error) {
+                console.error("Erreur de chargement:", error);
+                document.getElementById('music-grid').innerHTML = "<p>Impossible de charger la musique. Vérifie l'URL de l'API.</p>";
+            }
+        }
+
+        loadMusic();
+    </script>
+</body>
+</html>
