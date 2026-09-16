@@ -1,2 +1,4 @@
 python-telegram-bot==21.1
 mutagen==1.47.0
+fastapi==0.111.0
+uvicorn==0.30.1
